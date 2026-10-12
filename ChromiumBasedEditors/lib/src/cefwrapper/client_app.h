@@ -267,11 +267,12 @@ public:
 			command_line->AppendSwitch("--enable-experimental-web-platform-features");
 #endif
 
-#ifdef CEF_VERSION_ABOVE_86
-			command_line->AppendSwitch("--disable-site-isolation-trials");
-#endif
+			// Site isolation stays on (no --disable-site-isolation-trials).
 
 #ifdef CEF_VERSION_ABOVE_102
+			// The local editors are file:// pages that load their own scripts,
+			// fonts and translations with XHR. This switch only affects file://
+			// pages, which are the app's own: web pages cannot navigate to them.
 			command_line->AppendSwitch("--allow-file-access-from-files");
 #endif
 
@@ -302,8 +303,12 @@ public:
 			if (0 != forceDpi)
 				command_line->AppendSwitchWithValue("--force-device-scale-factor", std::to_string(forceDpi));
 
+#ifdef ENABLE_REMOTE_DEBUGGING_PORT
+			// DevTools on a TCP port gives any local process full control of
+			// every page; only developer builds may open it.
 			if (m_manager->GetDebugInfoSupport())
 				command_line->AppendSwitchWithValue("--remote-debugging-port", "8080");
+#endif
 
 #ifdef DISABLE_WEB_SECURITY
 			command_line->AppendSwitch("--disable-web-security");
