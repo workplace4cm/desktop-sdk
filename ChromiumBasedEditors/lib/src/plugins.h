@@ -266,6 +266,10 @@ public:
 
 	bool InstallPluginFromStore(const std::wstring& name)
 	{
+		// The plugin store is disabled: it downloads unsigned code from a
+		// third-party server.
+		return false;
+
 		std::wstring sPackageUrl = L"https://github.com/ONLYOFFICE/onlyoffice.github.io/releases/latest/download/" + name + L".plugin";
 
 		std::wstring sTmpFile = NSDirectory::GetTempPath() + L"/temp_asc_plugin.plugin";

@@ -28,6 +28,7 @@
 #include "./client_renderer.h"
 
 #include <algorithm>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -60,6 +61,47 @@
 #ifndef CEF_VERSION_ABOVE_102
 #include "include/cef_runnable.h"
 #endif
+
+namespace NSNativeAccess
+{
+	// The native AscDesktopEditor object is only given to the app's own pages:
+	// the local editors, the start page and bundled plugins (file://) and the
+	// internal ascdesktop:// pages. Web pages, remote iframes and pages on
+	// other schemes (onlyoffice://, data:, http(s)) never get it. Frames
+	// without a URL of their own (about:blank, srcdoc) take their parent's.
+	bool IsTrustedFrame(CefRefPtr<CefFrame> frame)
+	{
+		CefRefPtr<CefFrame> cur = frame;
+		while (cur)
+		{
+			std::string url = cur->GetURL().ToString();
+			if (url.empty() || 0 == url.find("about:"))
+			{
+				cur = cur->GetParent();
+				continue;
+			}
+			return (0 == url.find("file://") || 0 == url.find("ascdesktop://"));
+		}
+		return false;
+	}
+
+	// Native file paths a page may read or delete: results of conversions
+	// started by the native side, and files in the temp folder.
+	std::set<std::wstring> g_external_outputs;
+
+	bool IsInTempFolder(const std::wstring& path)
+	{
+		if (path.empty() || std::wstring::npos != path.find(L".."))
+			return false;
+		std::wstring tmp = NSFile::CFileBinary::GetTempPath();
+		std::wstring p = path;
+		NSStringUtils::string_replace(tmp, L"\\", L"/");
+		NSStringUtils::string_replace(p, L"\\", L"/");
+		while (!tmp.empty() && tmp[tmp.length() - 1] == '/')
+			tmp.pop_back();
+		return !tmp.empty() && 0 == p.find(tmp + L"/");
+	}
+}
 
 std::wstring GetTmpFileFromBase64(const std::string& sData, const std::wstring& sTmpFolder)
 {
@@ -1415,8 +1457,8 @@ else \n\
 			}
 			else if (name == "setCookie")
 			{
-				if (arguments.size() != 5)
-					return true;
+				// No portal logins in this build.
+				return true;
 
 				std::vector<CefRefPtr<CefV8Value>>::const_iterator iter = arguments.begin();
 
@@ -1437,8 +1479,7 @@ else \n\
 			}
 			else if (name == "setAuth")
 			{
-				if (arguments.size() != 4)
-					return true;
+				return true;
 
 				std::vector<CefRefPtr<CefV8Value>>::const_iterator iter = arguments.begin();
 
@@ -1472,8 +1513,8 @@ else \n\
 			}
 			else if (name == "getAuth")
 			{
-				if (arguments.size() != 1)
-					return true;
+				// Never hand login cookies to page script.
+				return true;
 
 				std::vector<CefRefPtr<CefV8Value>>::const_iterator iter = arguments.begin();
 
@@ -2571,6 +2612,11 @@ window._external_process_callback = {};\n\
 			{
 				bool bResult = false;
 
+				// Installing plugins is disabled: packages are unsigned and run
+				// inside the editor. Only the plugins shipped with the app load.
+				retval = CefV8Value::CreateBool(bResult);
+				return true;
+
 				CPluginsManager oPlugins;
 				oPlugins.m_strDirectory = m_sSystemPlugins;
 				oPlugins.m_strUserDirectory = m_sUserPlugins;
@@ -3036,7 +3082,7 @@ window._external_process_callback = {};\n\
 			else if (name == "RemoveFile")
 			{
 				std::wstring sFile = arguments[0]->GetStringValue();
-				if (NSFile::CFileBinary::Exists(sFile))
+				if (NSNativeAccess::IsInTempFolder(sFile) && NSFile::CFileBinary::Exists(sFile))
 					NSFile::CFileBinary::Remove(sFile);
 				return true;
 			}
@@ -4261,8 +4307,8 @@ window.AscDesktopEditor.CallInFrame(\"" +
 			}
 			else if (name == "sendSimpleRequest")
 			{
-				if (2 != arguments.size())
-					return true;
+				// Native HTTP requests bypass CORS; this build makes none.
+				return true;
 
 				int nCounter = arguments[0]->GetIntValue();
 				std::wstring sUrl = L"";
@@ -4653,8 +4699,12 @@ window.AscDesktopEditor.CallInFrame(\"" +
 
 				retval->SetValue("code", CefV8Value::CreateInt(nError), V8_PROPERTY_ATTRIBUTE_NONE);
 
-				if (true)
+				// Only the output of a conversion the native side just finished
+				// may be read, and only once.
+				std::set<std::wstring>::iterator itOutput = NSNativeAccess::g_external_outputs.find(sFile);
+				if (itOutput != NSNativeAccess::g_external_outputs.end())
 				{
+					NSNativeAccess::g_external_outputs.erase(itOutput);
 					BYTE* pData = NULL;
 					DWORD dwFileLen = 0;
 					NSFile::CFileBinary::ReadAllBytes(sFile, &pData, dwFileLen);
@@ -4676,12 +4726,9 @@ window.AscDesktopEditor.CallInFrame(\"" +
 			}
 			else if (name == "_createProcess")
 			{
-				std::string sCurrentUrl = CefV8Context::GetCurrentContext()->GetFrame()->GetURL().ToString();
-				if (0 != sCurrentUrl.find("onlyoffice://"))
-				{
-					retval = CefV8Value::CreateInt(-1);
-					return true;
-				}
+				// Starting programs from page script is disabled.
+				retval = CefV8Value::CreateInt(-1);
+				return true;
 
 				if (!m_external_processes)
 					m_external_processes = new NSProcesses::CProcessManager(this);
@@ -5501,6 +5548,9 @@ if (targetElem) { targetElem.dispatchEvent(event); }})();";
 		virtual void OnContextCreated(CefRefPtr<client::ClientAppRenderer> app, CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context) OVERRIDE
 		{
 			message_router_->OnContextCreated(browser, frame, context);
+
+			if (!NSNativeAccess::IsTrustedFrame(frame))
+				return;
 
 			// add AscEditorNative
 			CefRefPtr<CefV8Value> object = context->GetGlobal();
@@ -7012,6 +7062,7 @@ delete window[\"crypto_images_map\"][_url];\n\
 			}
 			else if (sMessageName == "on_convert_local_file_external")
 			{
+				NSNativeAccess::g_external_outputs.insert(message->GetArgumentList()->GetString(0).ToWString());
 				std::string sFile = message->GetArgumentList()->GetString(0).ToString();
 				int64 nFrameId = NSArgumentList::GetInt64(message->GetArgumentList(), 1);
 				NSStringUtils::string_replaceA(sFile, "\\", "\\\\");
